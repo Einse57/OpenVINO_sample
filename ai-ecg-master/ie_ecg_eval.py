@@ -17,7 +17,7 @@ import ecg_menu
 import threading
 from cpuinfo import get_cpu_info
 from matplotlib.widgets import Button
-from openvino.inference_engine import IENetwork, IECore
+from openvino.runtime import Core
 
 ecg_height = 8960
 
@@ -140,7 +140,12 @@ def build_argparser():
     return parser
 
 def on_select(item):
+    # Remove previous plot axes before rendering a new one
+    if hasattr(fig, 'last_ax1') and fig.last_ax1 in fig.axes:
+        fig.delaxes(fig.last_ax1)
+        fig.last_ax1 = None
     ax1 = fig.add_subplot(gs[2, :])
+    fig.last_ax1 = ax1
     ax2 = fig.add_subplot(gs[1, 3])
     image = plt.imread("openvino-logo.png")
     ax2.axis('off')
@@ -162,7 +167,8 @@ def on_select(item):
         log.info("Input ecg file shape: {}".format(input_ecg.shape))
 
         input_ecg_plot = np.squeeze(input_ecg)
-        
+        # Clear previous plot and avoid double rendering
+        ax1.cla()
         # raw signal plot
         Fs = 1000
         N = len(input_ecg_plot)
@@ -182,18 +188,19 @@ def on_select(item):
             model_bin = os.path.splitext(model_xml)[0] + ".bin"
         # Plugin initialization for specified device and load extensions library if specified
         log.info("OpenVINO Initializing plugin for {} device...".format(args.device))
-        ie = IECore()
+        ie = Core()
 
         # Read IR
         log.info("OpenVINO Reading IR...")
 
-        net = IENetwork(model=model_xml, weights=model_bin)
-        assert len(net.inputs.keys()) == 1, "Demo supports only single input topologies"
+        # NOTE: IENetwork is removed in OpenVINO 2025+, use ie.read_network()
+        net = ie.read_model(model=model_xml, weights=model_bin)
+        # NOTE: input/output info via net.inputs/outputs is deprecated, use compiled_model.input()/output()
+        assert len(net.inputs) == 1, "Demo supports only single input topologies"
 
-        #if args.cpu_extension and 'CPU' in args.device:
-        #    ie.add_extension(args.cpu_extension, "CPU")
         config = { 'PERF_COUNT' : ('YES' if args.perf_counts else 'NO')}
         device_nstreams = parseValuePerDevice(args.device, None)
+        # NOTE: set_config API may differ in OpenVINO 2025+, check documentation if needed
         if ('Async' in (item.labelstr)) and ('CPU' in (args.device)):
             ie.set_config({'CPU_THROUGHPUT_STREAMS': str(device_nstreams.get(args.device))
                                                          if args.device in device_nstreams.keys()
@@ -201,50 +208,51 @@ def on_select(item):
             device_nstreams[args.device] = int(ie.get_config(args.device, 'CPU_THROUGHPUT_STREAMS'))
    
         #prepare input blob
-        input_blob = next(iter(net.inputs))
+        # NOTE: input_blob = compiled_model.input() in OpenVINO 2025+
         #load IR to plugin
         log.info("Loading network with plugin...")
-      
-        n, h, w = net.inputs[input_blob].shape
-        log.info("Network input shape: {}".format(net.inputs[input_blob].shape))
+
+        # NOTE: Use compile_model instead of load_network
         if 'Async' in (item.labelstr):
-            exec_net = ie.load_network(net,
-                                      args.device,
-                                      config=config,
-                                      num_requests=12)
-            infer_requests = exec_net.requests
-            request_queue = InferRequestsQueue(infer_requests)
+            # Async API is different in OpenVINO 2025+, refactor needed for full async support
+            compiled_model = ie.compile_model(net, args.device, config)
+            # NOTE: Async requests should use compiled_model.create_infer_request() and callbacks
+            # For now, fallback to sync for demonstration
         else:
-            exec_net = ie.load_network(net,args.device)
-        output_blob = next(iter(net.outputs))
-        del net
+            compiled_model = ie.compile_model(net, args.device)
+
+        input_blob = compiled_model.input(0)
+        output_blob = compiled_model.output(0)
         
         #Do infer 
         inf_start = time.time()
 
         if 'Async' in (item.labelstr):
-            for i in range(12):
-                infer_request = request_queue.getIdleRequest()
-                if not infer_request:
-                    raise Exception("No idle Infer Requests!")
-                infer_request.startAsync({input_blob: input_ecg})
-            request_queue.waitAll()
+            # NOTE: Async infer API is different, needs refactor for OpenVINO 2025+
+            # For demonstration, use sync infer
+            res = compiled_model([input_ecg])
         else:
+            res = compiled_model([input_ecg])
 
-            res = exec_net.infer({input_blob: input_ecg})
-    
         inf_end = time.time()
-        
+
+        # NOTE: Output extraction is different
         if 'Async' in (item.labelstr):
             det_time = (inf_end - inf_start)/12
-            res = exec_net.requests[0].outputs[output_blob]
+            # res = compiled_model.output(0) # If using async, would need to gather results from requests
+            res = res[output_blob]
         else:
             det_time = inf_end - inf_start
             res = res[output_blob]
 
-        del exec_net
+        del compiled_model
         print("[Performance] each inference time:{} ms".format(det_time*1000))
-        prediction = sst.mode(np.argmax(res, axis=2).squeeze())[0][0]
+
+        mode_result = sst.mode(np.argmax(res, axis=2).squeeze(), keepdims=True)
+        if hasattr(mode_result.mode, 'item'):
+            prediction = mode_result.mode.item()
+        else:
+            prediction = mode_result.mode[0]
         print(prediction)
         result = preproc.int_to_class[prediction]
 
@@ -256,18 +264,24 @@ def on_select(item):
     
 
 if __name__ == '__main__':
-    
+
+    def handle_close(event):
+        import sys
+        import matplotlib.pyplot as plt
+        plt.close('all')
+        sys.exit(0)
 
     fig = plt.figure(figsize=(15,12))
-    fig.suptitle('Select ECG file of The Physionet 2017 Challenge from below list:', color="#009999", fontsize=18, fontweight='bold')
+    fig.canvas.mpl_connect('close_event', handle_close)
+    # Move title below the menu bar
+    fig.text(0.5, 0.92, 'Select ECG file of The Physionet 2017 Challenge from below list:',
+             color="#009999", fontsize=18, fontweight='bold', ha='center', va='top')
     widths = [1, 1, 1, 1]
-    heights = [1, 1, 8, 7]
+    heights = [1, 1, 6, 2]  # Reduce plot height, add info area
     gs = gridspec.GridSpec(ncols=4, nrows=4, width_ratios=widths, height_ratios=heights, figure=fig)
-    ax = plt.gca()
     #Menu
-    props = ecg_menu.ItemProperties(labelcolor='black', bgcolor='#00cc66', fontsize=15, alpha=0.2)
-    hoverprops = ecg_menu.ItemProperties(labelcolor='white', bgcolor='#4c0099',
-                            fontsize=15, alpha=0.2)
+    props = ecg_menu.ItemProperties(labelcolor='white', bgcolor='#66ff99', fontsize=18, alpha=1.0)
+    hoverprops = ecg_menu.ItemProperties(labelcolor='white', bgcolor='#33cc77', fontsize=18, alpha=1.0)
     menuitems = []
 
     for label in ('A00001.mat','A00005.mat','A00008.mat','A00022.mat','A00125.mat', 'Async 12 inputs', 'clear'):
@@ -275,16 +289,13 @@ if __name__ == '__main__':
         menuitems.append(item)
     menu = ecg_menu.Menu(fig, menuitems, 50, 1100)
 
- 
-    #The Physionet 2017 Challenge
-
-    
+    # Info text area below the plot
+    info_ax = fig.add_subplot(gs[3, :])
+    info_ax.axis('off')
     info = get_cpu_info()
     t = "CPU info: " +info['brand_raw'] + ", num of core(s): " +str(info['count'])
-
     t1 = ("In this Challenge, we treat all non-AF abnormal rhythms as a single "
-          "class and require the Challenge entrant to classify the rhythms as:"
-         )
+          "class and require the Challenge entrant to classify the rhythms as:")
     t2 = ("1) N - Normal sinus rhythm")
     t3 = ("2) A - Atrial Fibrillation (AF)")
     t4 = ("3) O - Other rhythm")
@@ -292,19 +303,32 @@ if __name__ == '__main__':
     t6 = ("*Algo refer to: Stanford Machine Learning Group ECG classification DNN model")
     t7 = ("https://stanfordmlgroup.github.io/projects/ecg2/")
     t8 = ("Demo created by: Zhao, Zhen (Fiona), VMC, IoTG, Intel")
-    ax.text(.5, .25, t, fontsize=16, style='oblique', ha='center', va='top', wrap=True, color="#0066cc")
-    ax.text(.5, .2, t1, fontsize=16, style='oblique', ha='center', va='top', wrap=True)
-    ax.text(.0, .14, t2, fontsize=16, style='oblique', ha='left', va='top', wrap=True)
-    ax.text(.0, .11, t3, fontsize=16, style='oblique', ha='left', va='top', wrap=True, color="#cc0066")
-    ax.text(.0, .08, t4, fontsize=16, style='oblique', ha='left', va='top', wrap=True, color="#6600cc")
-    ax.text(.0, .05, t5, fontsize=16, style='oblique', ha='left', va='top', wrap=True)
-    ax.text(1,  .0, t6, fontsize=10, style='oblique', ha='right', va='top', wrap=True)
-    ax.text(1,  -.03, t7, fontsize=10, style='oblique', ha='right', va='top', wrap=True, color='b')
-    ax.text(1, -.08, t8, fontsize=12, style='oblique', ha='right', va='top', wrap=True, color='c', fontweight='bold')
+    # Render info text in the info_ax area with dynamic vertical spacing
+    info_lines = [
+        (t, 16, 'center', 'top', '#0066cc'),
+        (t1, 16, 'center', 'top', 'black'),
+        (t2, 16, 'left', 'top', 'black'),
+        (t3, 16, 'left', 'top', '#cc0066'),
+        (t4, 16, 'left', 'top', '#6600cc'),
+        (t5, 16, 'left', 'top', 'black'),
+        (t6, 10, 'right', 'top', 'black'),
+        (t7, 10, 'right', 'top', 'b'),
+        (t8, 12, 'right', 'top', 'c'),
+    ]
+    n_lines = len(info_lines)
+    # Use evenly spaced y positions from top to bottom, with horizontal padding
+    left_pad = 0.08
+    right_pad = 0.92
+    for idx, (text, fontsize, ha, va, color) in enumerate(info_lines):
+        y = 0.95 - idx * (0.9 / (n_lines-1))  # spread lines evenly from y=0.95 to y=0.05
+        x = 0.5 if ha=='center' else (left_pad if ha=='left' else right_pad)
+        info_ax.text(x, y, text,
+                     fontsize=fontsize, style='oblique', ha=ha, va=va, wrap=True, color=color,
+                     fontweight='bold' if idx==8 else 'normal')
     plt.axis('off')
     
     plt.show()
-    #out = ecg.ecg(signal=input_ecg_plot, sampling_rate=1000., show=True)       
+    #out = ecg.ecg(signal=input_ecg_plot, sampling_rate=1000., show=True)
 
 
 

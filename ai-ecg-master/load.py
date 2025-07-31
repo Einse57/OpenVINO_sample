@@ -1,7 +1,3 @@
-from __future__ import print_function
-from __future__ import division
-from __future__ import absolute_import
-
 import json
 import numpy as np
 import os
@@ -44,7 +40,7 @@ def load_ecg(record):
     elif os.path.splitext(record)[1] == ".mat":
         ecg = sio.loadmat(record)['val'].squeeze()
     else: # Assumes binary 16 bit integers
-        with open(record, 'r') as fid:
+        with open(record, 'rb') as fid:
             ecg = np.fromfile(fid, dtype=np.int16)
 
     trunc_samp = STEP * int(len(ecg) / STEP)
