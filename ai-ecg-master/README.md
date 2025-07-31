@@ -21,11 +21,11 @@ In this case, takes as input the raw ECG data (sampled at 200 Hz), highly optimi
 + pip install pickle
 + sudo apt install python3-tk
 
-## Setup OpneVINO env
+## Setup OpenVINO env
 source /opt/intel/openvino/bin/setupvars.sh
 
 ## Start AI-ECG demo
-python ie_ecg_eval.py -d <CPU|GPU|HDDL|MYRIAD|FPGA>
+python ie_ecg_eval.py -d <CPU|GPU|NPU>
 
 ## Screenshot
 ![alt text](ecg3.png)
