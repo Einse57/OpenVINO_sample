@@ -128,7 +128,7 @@ def build_argparser():
                            "kernels implementations.", type=str, default=None)
     args.add_argument("-pp", "--plugin_dir", help="Optional. Path to a plugin folder", type=str, default=None)
     args.add_argument("-d", "--device",
-                      help="Optional. Specify the target device to infer on; CPU, GPU, FPGA, HDDL or MYRIAD is "
+                      help="Optional. Specify the target device to infer on; CPU, GPU, FPGA, NPU is "
                            "acceptable. The demo will look for a suitable plugin for device specified. "
                            "Default value is CPU", default="CPU", type=str)
     args.add_argument("--labels", help="Optional. Path to labels mapping file", default=None, type=str)
