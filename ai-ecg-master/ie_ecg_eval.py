@@ -17,7 +17,7 @@ import ecg_menu
 import threading
 from cpuinfo import get_cpu_info
 from matplotlib.widgets import Button
-from openvino.runtime import Core
+from openvino import Core
 
 ecg_height = 8960
 
@@ -202,10 +202,13 @@ def on_select(item):
         device_nstreams = parseValuePerDevice(args.device, None)
         # NOTE: set_config API may differ in OpenVINO 2025+, check documentation if needed
         if ('Async' in (item.labelstr)) and ('CPU' in (args.device)):
-            ie.set_config({'CPU_THROUGHPUT_STREAMS': str(device_nstreams.get(args.device))
-                                                         if args.device in device_nstreams.keys()
-                                                         else 'CPU_THROUGHPUT_AUTO' }, args.device)
-            device_nstreams[args.device] = int(ie.get_config(args.device, 'CPU_THROUGHPUT_STREAMS'))
+            # Check if CPU_THROUGHPUT_STREAMS is supported before setting/getting
+            supported_props = ie.get_property(args.device, 'SUPPORTED_PROPERTIES')
+            if 'CPU_THROUGHPUT_STREAMS' in supported_props:
+                ie.set_property(args.device, {'CPU_THROUGHPUT_STREAMS': str(device_nstreams.get(args.device))
+                                                             if args.device in device_nstreams.keys()
+                                                             else 'CPU_THROUGHPUT_AUTO'})
+                device_nstreams[args.device] = int(ie.get_property(args.device, 'CPU_THROUGHPUT_STREAMS'))
    
         #prepare input blob
         # NOTE: input_blob = compiled_model.input() in OpenVINO 2025+
@@ -256,6 +259,24 @@ def on_select(item):
         print(prediction)
         result = preproc.int_to_class[prediction]
 
+        # Store previous runs for overlay
+        if not hasattr(fig, 'run_history'):
+            fig.run_history = []
+        # Color cycle for overlays
+        overlay_colors = ['b', 'g', 'r', 'm', 'y', 'k', 'c']
+        # Append current run to history
+        fig.run_history.append((ts, input_ecg_plot, item.labelstr))
+        # Clear plot only on first run
+        if len(fig.run_history) == 1:
+            ax1.cla()
+        # Overlay all runs
+        for idx, (ts_run, ecg_run, label_run) in enumerate(fig.run_history):
+            color = overlay_colors[idx % len(overlay_colors)]
+            ax1.plot(ts_run, ecg_run, label=label_run, lw=2, color=color)
+        ax1.set_ylabel('Amplitude')
+        ax1.set_title("ECG Raw signal: length - {}, Freq - 1000 Hz".format(ecg_h))
+        ax1.legend(loc='upper right')
+        # Only update xlabel for latest run
         ax1.set_xlabel('File: {}, Intel OpenVINO Infer_perf for each input: {}ms, classification_result: {}'.format(item.labelstr, det_time*1000, result), fontsize=15, color="c", fontweight='bold')
         ax1.grid()
         
